@@ -1,0 +1,452 @@
+using Revise
+using LinearAlgebra, Plots, LaTeXStrings
+using QuantumDigitalTwins
+using QuantumGateDesign
+using Random, Distributions
+
+nqubits = 1
+
+center = 4.5
+std_dev = 0.05
+gauss_distribution = Normal(center, std_dev)
+
+
+H_control_real = [0.0 1;
+1 0]
+H_control_imag = [0.0 1;
+-1 0]
+real_control_ops = [H_control_real]
+imag_control_ops = [H_control_imag]
+U0 = [1 0; 0 1]
+t0 = 0.0
+T = 50.0 # time in nanoseconds
+nsteps = 200
+sym_ops = [H_control_real]
+asym_ops = [H_control_imag]
+
+omega_samples = 10
+omegas = rand(gauss_distribution, omega_samples)
+deltas = omegas .- center
+
+probs = [SchrodingerProb(Float64[0 0; 0 delta], real_control_ops, imag_control_ops, U0, T, nsteps)
+         for delta in deltas]
+
+# N_GRAPE_amplitudes = 2
+# control = GRAPEControl(N_GRAPE_amplitudes, T)
+max_control_parameter = 0.1
+pcof_l = -max_control_parameter
+pcof_u = max_control_parameter
+
+degree = 2
+D1 = 10
+control = FortranBSplineControl(degree, D1, T)
+pcof0 = (0.5 .- rand(control.N_coeff)) .* max_control_parameter
+
+x_gate = [0 1; 1 0]
+y_gate = [0 -im; im 0]
+z_gate = [1 0; 0 -1]
+
+x_gate_prob = abs2.(x_gate)
+y_gate_prob = abs2.(y_gate)
+z_gate_prob = abs2.(z_gate)
+
+
+opt_gate = x_gate
+opt_gate_prob = abs2.(x_gate)
+
+## Single problem
+#println("Optimizing single problem")
+#opt_ret_single = optimize_prob(probs[1], control, pcof0, opt_gate, pcof_lbound=pcof_l, pcof_ubound=pcof_u, cost_type=:Infidelity, ipopt_options=["max_iter" => 100])
+
+# Multiple Problems
+# println("Optimizing 'risk-netural' multiple problem")
+# opt_ret_multiple = optimize_prob(probs, control, pcof0, opt_gate, pcof_lbound=pcof_l, pcof_ubound=pcof_u, cost_type=:Infidelity, ipopt_options=["max_iter" => 100])
+
+# pcof_optimal = opt_ret_multiple.x
+# history_optimal = eval_forward(probs[1], control, pcof_optimal)
+# pop_plots = plot_populations(history_optimal, T, labels=["|0>", "|1>"])
+# control_plot = plot_controls(control, pcof_optimal)
+
+function get_last_state(probs::Vector{<: SchrodingerProb}, control, pcof::AbstractVector)
+    last_states = []
+    last_states_pop = []
+    N = length(probs)
+    for i in 1:N 
+        history_optimal = eval_forward(probs[i], control, pcof_optimal)
+        push!(last_states, history_optimal[:,end,:])
+        push!(last_states_pop, abs2.(history_optimal[:,end,:]))
+    end
+    return last_states, last_states_pop
+end
+
+function get_history(probs::Vector{<: SchrodingerProb}, control, pcof::AbstractVector, samples::Int64, epsilon_vec::AbstractVector)
+    history = []
+    history_pop = []
+    last_states = []
+    last_states_pop = []
+    history_meas = []
+    last_state_meas = []
+    N = length(probs)
+    for i in 1:N
+        history_optimal = eval_forward(probs[i], control, pcof)
+        push!(history, history_optimal)
+        push!(history_pop, abs2.(history_optimal))
+        push!(last_states, history_optimal[:,end,:])
+        push!(last_states_pop, abs2.(history_optimal[:,end,:]))
+        meas_data, _ = create_synthetic_data_full(abs2.(history_optimal), samples, epsilon_vec)
+        push!(history_meas, meas_data)
+        push!(last_state_meas, meas_data[:,end,:])
+    end
+    return history, history_pop , last_states, last_states_pop, history_meas, last_state_meas
+end
+
+function plot_risk_neutral(histories::Vector{Any}, x_data, target_gate::AbstractMatrix)
+    plt_pop1 = plot(xlabel = "t")
+    plt_pop2 = plot(xlabel = "t")
+    N = length(histories)
+    pred_pop_fidelities = [fidelity_probability(abs2.(histories[i][:,end,:]), abs2.(target_gate)) for i in 1:N]
+    pred_fidelities = [fidelity(histories[i][:,end,:], target_gate) for i in 1:N]
+    min_pop_fidelity = minimum(pred_pop_fidelities)
+    argmin_pop_fidelity = argmin(pred_pop_fidelities)
+    min_fidelity = minimum(pred_fidelities)
+    argmin_fidelity = argmin(pred_fidelities)
+    cols = palette(:default)[1:2]
+    # println(N)
+    for i in 1:N 
+        opacity = i == argmin_pop_fidelity ? 0.95 : 0.3
+        lw = i == argmin_pop_fidelity ? 1.5 : 1
+        plot!(plt_pop1, x_data, abs2.(histories[i][1,:,1]), alpha = opacity, legend = false, linewidth = lw, color = cols[1])
+        plot!(plt_pop1, x_data, abs2.(histories[i][2,:,1]), alpha = opacity, legend = false, linewidth = lw, color = cols[2])
+        if i == argmin_pop_fidelity
+            annotate!(plt_pop1, x_data[end], abs2.(histories[i][1,end,1]), text("Min Fidelity Plot: ", 6))
+        end
+        plot!(plt_pop2, x_data, abs2.(histories[i][1,:,2]), alpha = opacity, legend = false, linewidth = lw, color = cols[1])
+        plot!(plt_pop2, x_data, abs2.(histories[i][2,:,2]), alpha = opacity, legend = false, linewidth = lw, color = cols[2])
+        if i == argmin_pop_fidelity
+            annotate!(plt_pop2, x_data[end], abs2.(histories[i][1,end,1]), text("Min Fidelity Plot: ", 5))
+        end
+    end
+    # display(plt_pop1)
+    return plt_pop1, plt_pop2
+end
+
+# function plot_risk_neutral_2(histories, x_data, target_gate)
+#     N = length(histories)
+
+#     pred_pop_fidelities = [
+#         fidelity_probability(abs2.(histories[i][:,end,:]), abs2.(target_gate))
+#         for i in 1:N
+#     ]
+
+#     worst = argmin(pred_pop_fidelities)
+
+#     pop1 = hcat([abs2.(h[:,:,1])' for h in histories]...)
+#     pop2 = hcat([abs2.(h[:,:,2])' for h in histories]...)
+
+#     plt_pop1 = plot(x_data, pop1, alpha=0.3, legend=false, xlabel="t")
+#     plt_pop2 = plot(x_data, pop2, alpha=0.3, legend=false, xlabel="t")
+
+#     plot!(plt_pop1, x_data, pop1[:,worst], linewidth=2)
+#     plot!(plt_pop2, x_data, pop2[:,worst], linewidth=2)
+
+#     return plot(plt_pop1, plt_pop2, layout=(2,1))
+# end
+
+
+# history, abs_history = get_history(probs, control, pcof_optimal)
+# t_range = LinRange(t0, T, nsteps + 1)
+# p1, p2 = plot_risk_neutral(history, t_range, opt_gate)
+# display(p1)
+
+function create_probs(center, std_dev, samples, degree, splines, gate, eps_vec)
+    gauss_distribution = Normal(center, std_dev)
+
+    gate_pop = abs2.(gate)
+
+    x = range(1, 8, length=500)
+    y = pdf.(gauss_distribution, x)
+
+    distribution_plot = plot(x, y, xlabel=L"ω", label="Normal($center,$std_dev)")
+
+    H_control_real = [0.0 1;
+    1 0]
+    H_control_imag = [0.0 1;
+    -1 0]
+    real_control_ops = [H_control_real]
+    imag_control_ops = [H_control_imag]
+    U0 = [1 0; 0 1]
+    t0 = 0.0
+    T = 50.0 # time in nanoseconds
+    nsteps = 200
+    sym_ops = [H_control_real]
+    asym_ops = [H_control_imag]
+
+    omega_samples = 10
+    omegas = rand(gauss_distribution, omega_samples)
+    deltas = omegas .- center
+
+    probs = [SchrodingerProb(Float64[0 0; 0 delta], real_control_ops, imag_control_ops, U0, T, nsteps)
+            for delta in deltas]
+
+    max_control_parameter = 0.1
+    pcof_l = -max_control_parameter
+    pcof_u = max_control_parameter
+
+    control = FortranBSplineControl(degree, splines, T)
+    pcof0 = (0.5 .- rand(control.N_coeff)) .* max_control_parameter
+
+    println("Optimizing 'risk-netural' multiple problem")
+    opt_ret_multiple = optimize_prob(probs, control, pcof0, gate, pcof_lbound=pcof_l, pcof_ubound=pcof_u, cost_type=:Infidelity, ipopt_options=["max_iter" => 100, "print_level" => 1])
+    infidelity = opt_ret_multiple.obj_val
+    pcof_optimal = opt_ret_multiple.x
+    history, pop_history, last_state, last_state_pop, history_meas, last_state_meas = get_history(probs, control, pcof_optimal,10000,eps_vec)
+    fidelity_pop = fidelity_probability_risk_neutral(last_state_pop, abs2.(gate_pop))
+    infidelity_pop = 1 - fidelity_pop
+
+    #Also calculate measured fidelity
+    meas_fidelity = fidelity_probability_risk_neutral(last_state_meas, abs2.(gate_pop))
+    meas_infidelity = 1 - meas_fidelity
+
+    t_range = LinRange(t0, T, nsteps + 1)
+    p1, p2 = plot_risk_neutral(history, t_range, gate)
+
+    return gauss_distribution, pcof_optimal, infidelity, infidelity_pop, meas_infidelity, p1, p2, distribution_plot
+end
+
+std_dev_list = [0.5, 0.1, 0.05, 0.01]
+
+pred_infidelities = Vector{Vector{Float64}}(undef, length(std_dev_list))
+pred_infidelties_pop = Vector{Vector{Float64}}(undef, length(std_dev_list))
+meas_infidelities  = Vector{Vector{Float64}}(undef, length(std_dev_list))
+
+
+global count = 1
+for i in std_dev_list
+    dist, pcof_optimal, infidelity_x, infidelity_pop_x, meas_infidelity_x, pop_1_x, pop_2_x, distribution_plot = create_probs(4.5, i, 100, 2, 10, x_gate, 1E-5*rand(2))
+    dist, pcof_optimal, infidelity_y, infidelity_pop_y, meas_infidelity_y, pop_1_y, pop_2_y, distribution_plot = create_probs(4.5, i, 100, 2, 10, y_gate, 1E-5*rand(2))
+    dist, pcof_optimal, infidelity_z, infidelity_pop_z, meas_infidelity_z, pop_1_z, pop_2_z, distribution_plot = create_probs(4.5, i, 100, 2, 10, z_gate, 1E-1*rand(2))
+    display(distribution_plot)
+    pred = [infidelity_x, infidelity_y, infidelity_z]
+    pred_pop = [infidelity_pop_x, infidelity_pop_y, infidelity_pop_z]
+    meas = [meas_infidelity_x, meas_infidelity_y, meas_infidelity_z]
+    pred_infidelities[count] = pred 
+    pred_infidelties_pop[count] = pred_pop 
+    meas_infidelities[count] = meas
+    println("Infidelity for X gate with std_dev ", i, ": ", infidelity_x, " (pop infidelity: ", infidelity_pop_x, ", meas infidelity: ", meas_infidelity_x, ")")
+    println("Infidelity for Y gate with std_dev ", i, ": ", infidelity_y, " (pop infidelity: ", infidelity_pop_y, ", meas infidelity: ", meas_infidelity_y, ")")
+    println("Infidelity for Z gate with std_dev ", i, ": ", infidelity_z, " (pop infidelity: ", infidelity_pop_z, ", meas infidelity: ", meas_infidelity_z, ")")
+    global count += 1
+end
+
+
+function traffic_light_color(pred_inf, meas_inf, atol::Float64, eps::Float64)
+    N_gates = length(pred_inf)
+    approx_list_bool = []
+    measure_list_bool = []
+    pred_list_bool = []
+    for i in 1:N_gates 
+        if abs(pred_inf[i] - meas_inf[i]) < atol
+            push!(approx_list_bool, true)
+        else
+            push!(approx_list_bool, false)
+        end
+        if meas_inf[i] < eps
+            push!(measure_list_bool, true)
+        else
+            push!(measure_list_bool, false)
+        end
+        if pred_inf[i] < eps
+            push!(pred_list_bool, true)
+        else
+            push!(pred_list_bool, false)
+        end
+    end
+    # print(count(!, pred_list_bool))
+    # print(sum(.!measure_list_bool))
+    if sum(.!pred_list_bool) >= 1
+        println("Red Light: Gates $(findall(!, pred_list_bool)) have predicted infidelities above the threshold, perform characterization and optimization to improve the predicted infidelity values.")
+        return 1
+    elseif pred_list_bool == [true, true, true] && sum(.!measure_list_bool) >= 2
+        println("Red Light: Most gates have a measured infidelity above the threshold, even if the predicted infidelities are low.")
+        return 2
+    elseif pred_list_bool == [true, true, true] && sum(.!measure_list_bool) == 1
+        println("Yellow Light: Most gates have predicted and measured infidelities within the acceptable range, but gate $(findfirst(!, measure_list_bool)) has a measured infidelity above the threshold.")
+        return 3
+    elseif all(approx_list_bool) && all(measure_list_bool)
+        println("Green Light: All gates have predicted and measured infidelities within the acceptable range.")
+        return 0
+    else
+        println("Other case, check the infidelity values and thresholds.")
+        return 4
+    end
+    println("approx_list_bool: ", approx_list_bool)
+    println("measure_list_bool: ", measure_list_bool)
+    println("pred_list_bool: ", pred_list_bool)
+    
+end
+
+traffic_light_color(pred_infidelties_pop[4], meas_infidelities[4], 1E-4, 1E-3)
+
+std_dev = 1.0
+center = 4.5 
+samples = 100
+D = 2
+N = 10
+dist, pcof_optimal, infidelity_x, infidelity_pop_x, meas_infidelity_x, pop_1_x, pop_2_x, distribution_plot = create_probs(4.5, i, 100, 2, 10, x_gate, 1E-5*rand(2))
+dist, pcof_optimal, infidelity_y, infidelity_pop_y, meas_infidelity_y, pop_1_y, pop_2_y, distribution_plot = create_probs(4.5, i, 100, 2, 10, y_gate, 1E-5*rand(2))
+dist, pcof_optimal, infidelity_z, infidelity_pop_z, meas_infidelity_z, pop_1_z, pop_2_z, distribution_plot = create_probs(4.5, i, 100, 2, 10, z_gate, 1E-1*rand(2))
+
+result_traffic = traffic_light_color()
+
+#How to visualize the measured infidelities?
+#The measured infidelties are pre-specified so I basically set which gate I want to be "bad"
+#Maybe should do loops like the following: 
+#Run simulations for 2 loops that you know what it's going to look like, where the epsilon_vec is based on the number of the degree of the spline used
+
+#Need to have the condition that 
+
+#Now get measured fidelity, need to change the data
+
+#=
+final_prob_optimal = abs2.(history_optimal[:,end,:])
+
+
+pop1 = abs2.(history_optimal[:,:,1])'
+pop2 = abs2.(history_optimal[:,:,2])'
+
+epsilon_vec = 0.1*rand(2^nqubits)
+samples = 10000
+p_hat1, p_obs1 = create_synthetic_data(pop1, samples, epsilon_vec)
+p_hat2, p_obs2 = create_synthetic_data(pop2, samples, epsilon_vec)
+
+meas_gate_prob = hcat(p_hat1[end,:], p_hat2[end,:])
+
+time_range = LinRange(t0, T, nsteps + 1)
+
+colors = palette(:auto)[1:2^nqubits]
+
+init_plot_1 = plot(time_range, pop1, labels = [L"Pred:|0\rangle" L"Pred:|1\rangle"], xlabel = "t", ylabel = "Population", dpi = 250, alpha = [1, 0.4], palette = colors)
+plot!(time_range, p_hat1, labels = [L"Obs: |0\rangle" L"Obs: |1\rangle"], legend=:outertop, legend_columns = 4, xlabel = "t", ylabel = "Population", dpi = 250, alpha = 0.4)
+init_plot_2 = plot(time_range, pop2, labels = [L"Pred:|0\rangle" L"Pred:|1\rangle"], xlabel = "t", ylabel = "Population", dpi = 250,palette = colors)
+plot!(time_range, p_hat2, labels = [L"Obs: |0\rangle" L"Obs: |1\rangle"], legend=:outertop, legend_columns = 4, xlabel = "t", ylabel = "Population", dpi = 250, alpha = 0.4)
+
+I_pred = fidelity_probability(final_prob_optimal, opt_gate_prob)
+I_meas = fidelity_probability(meas_gate_prob, opt_gate_prob)
+
+println("Predicted Infidelity: ", I_pred)
+println("Measured Infidelity: ", I_meas)
+
+function fidelity_gateset(gate_set::Vector{<:AbstractMatrix}, std_dev::Float64 = 0.1, degree::Int64 = 0, D1::Int64 = 1, samples::Int64 = 10000)
+    N_gates = length(gate_set)
+    pred_infidelity_list = zeros(N_gates)
+    meas_infidelity_list = zeros(N_gates)
+
+    center = 4.5
+    # std_dev = 0.5
+    gauss_distribution = Normal(center, std_dev)
+
+    omega = rand(gauss_distribution)
+    delta = omega - center
+    H_drift = zeros(2,2)
+    H_drift[2,2] = delta
+    H_control_real = [0.0 1;
+                    1   0]
+    H_control_imag = [0.0 1;
+                    -1  0]
+    real_control_ops = [H_control_real]
+    imag_control_ops = [H_control_imag]
+    U0 = [1 0; 0 1]
+
+    # degree = 0
+    # D1 = 1
+    
+
+    t0 = 0.0
+    T = 50.0 # time in nanoseconds
+    # sim_T = 100.0 
+    nsteps = 200
+    sym_ops = [H_control_real]
+    asym_ops = [H_control_imag]
+
+    prob = SchrodingerProb(H_drift, real_control_ops, imag_control_ops, U0, T, nsteps)
+    control = FortranBSplineControl(degree, D1, T)
+    pcof0 = (0.5 .- rand(control.N_coeff)) .* max_control_parameter 
+    for i in 1:N_gates 
+        opt_gate = gate_set[i]
+        opt_gate_prob = abs2.(opt_gate)
+        opt_ret = optimize_prob(prob, control, pcof0, opt_gate, pcof_lbound=pcof_l, pcof_ubound=pcof_u, cost_type=:Infidelity, ipopt_options=["max_iter" => 100])
+        pcof_optimal = opt_ret.x
+
+        history_optimal = eval_forward(prob, control, pcof_optimal)
+        final_prob_optimal = abs2.(history_optimal[:,end,:])
+        # println("final prob optimal for gate $i:")
+        # display(final_prob_optimal)
+        pop1 = abs2.(history_optimal[:,:,1])'
+        pop2 = abs2.(history_optimal[:,:,2])'
+        println("std_dev: ", std_dev)
+        epsilon_vec = (std_dev/10)*rand(2^nqubits)
+        p_hat1, p_obs1 = create_synthetic_data(pop1, samples, epsilon_vec)
+        p_hat2, p_obs2 = create_synthetic_data(pop2, samples, epsilon_vec)
+        meas_gate_prob = hcat(p_hat1[end,:], p_hat2[end,:])
+        I_pred = fidelity_probability(final_prob_optimal, opt_gate_prob)
+        I_meas = fidelity_probability(meas_gate_prob, opt_gate_prob)
+        pred_infidelity_list[i] = 1 - I_pred 
+        meas_infidelity_list[i] = 1 - I_meas
+        println("&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&")
+        println()
+        println("Predicted Infidelity for Gate $i: ", I_pred)
+        println("Measured Infidelity for Gate $i: ", I_meas)
+        println()
+        println("&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&")
+    end
+    return pred_infidelity_list, meas_infidelity_list
+end
+# pred_infidelity_list, meas_infidelity_list = fidelity_gateset([x_gate, y_gate, z_gate], 0.005, 2, 4, 100000)
+
+# function green_light_test(a, b, atol, eps)
+#     N_gates = length(a)
+#     for i in 1:N_gates 
+#         if a[i] > eps && b[i] > eps && abs(a[i] - b[i]) < atol
+#             continue
+#         else
+#             return false 
+#         end
+#     end 
+#     return true
+# end
+
+# function yellow_red_light_test(a, b, atol, eps)
+#     N_gates = length(a)
+#     for i in 1:N_gates
+#         if abs(a[i] - b[i]) < atol && b[i] > eps
+#             println("Yellow light condition met for gate $i: Measured infidelity = $(b[i])")
+#         end
+#     end
+# end
+
+# function red_light_test(a, b, atol, eps)
+#     N_gates = length(a)
+#     for i in 1:N_gates
+
+
+
+
+# pred_infidelity_list, meas_infidelity_list = fidelity_gateset([x_gate, y_gate, z_gate], 0.01, 2, 4, 100000)
+# println("Test 1, with standard deviation of 0.01")
+# traffic_light_color(pred_infidelity_list, meas_infidelity_list, 1E-3, 1E-4)
+# pred_infidelity_list, meas_infidelity_list = fidelity_gateset([x_gate, y_gate, z_gate], 0.005, 2, 4, 100000)
+# println("Test 2, with standard deviation of 0.005")
+# traffic_light_color(pred_infidelity_list, meas_infidelity_list, 1E-3, 1E-4)
+# pred_infidelity_list, meas_infidelity_list = fidelity_gateset([x_gate, y_gate, z_gate], 0.0015, 2, 4, 100000)
+# println("Test 3, with standard deviation of 0.0015")
+# traffic_light_color(pred_infidelity_list, meas_infidelity_list, 1E-3, 1E-4)
+
+
+# f(omega) = omega^2/(omega^2 + delta^2)*sin(0.5*T*sqrt(delta^2 + omega^2)) - 1
+
+# omega_0 = pi/(2*T)
+# prob = NonlinearProblem(f, omega_0, p)
+# sol = NLS.solve(prob)
+# f(sol.u)
+
+=#
